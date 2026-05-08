@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flow Matching 1D — Clean Visual Simulation</title>
+    <style>
+        body { font-family: system-ui, sans-serif; margin:0; padding:20px; background:#f8f9fa; }
+        .container { max-width:960px; margin:0 auto; background:white; border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,0.1); overflow:hidden; }
+        header { background:linear-gradient(90deg,#4a6cf7,#7b5eff); color:white; padding:20px 30px; text-align:center; }
+        h1 { margin:0; font-size:2.1rem; }
+        .subtitle { margin:8px 0 0; opacity:0.95; }
+        .canvas-container { padding:20px 30px 10px; text-align:center; }
+        canvas { border:1px solid #ddd; border-radius:8px; box-shadow:0 4px 15px rgba(0,0,0,0.08); }
+        .controls { padding:15px 30px 25px; background:#f8f9fa; display:flex; align-items:center; gap:15px; flex-wrap:wrap; }
+        button { padding:10px 18px; font-size:15px; border:none; border-radius:6px; cursor:pointer; background:#4a6cf7; color:white; }
+        button:hover { background:#3a5ce0; }
+        button#pauseBtn { background:#e74c3c; }
+        input[type="range"] { flex:1; min-width:220px; }
+        .info { padding:0 30px 25px; font-size:15px; line-height:1.5; color:#444; }
+        .legend { display:flex; gap:20px; justify-content:center; font-size:13px; margin-top:10px; }
+        .dot { width:12px; height:12px; border-radius:50%; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Flow Matching in 1D</h1>
+            <p class="subtitle">From Gaussian noise → quad-modal data (straight-line training paths + particle flow)</p>
+        </header>
+        
+        <div class="canvas-container">
+            <canvas id="canvas" width="920" height="660"></canvas>
+        </div>
+        
+        <div class="controls">
+            <button id="playBtn">▶ Play</button>
+            <button id="pauseBtn" style="display:none;">⏸ Pause</button>
+            <button id="resetBtn">Reset</button>
+            
+            <label style="font-size:14px; margin-left:10px;">
+                t = <span id="timeDisplay">0.00</span>
+            </label>
+            <input type="range" id="timeSlider" min="0" max="1" step="0.001" value="0" style="flex:1;">
+            
+            <label style="font-size:14px;">
+                <input type="checkbox" id="showPaths" checked> Show training paths
+            </label>
+        </div>
+        
+        <div class="info">
+            <strong>How to read this simulation:</strong><br>
+            • Bottom = noise p₀ ~ 𝒩(0,1)<br>
+            • Top = target p₁ (four modes)<br>
+            • Faint gray lines = <strong>800 straight training paths</strong> (what the model sees during training)<br>
+            • Large colored dots = <strong>50 highlighted particles</strong> moving along their own straight paths<br>
+            • At any point (x,t) many paths cross → the network learns the <strong>average velocity</strong> there.<br>
+            • When you run the real model, particles follow the learned <em>average</em> flow (curved paths) and still land correctly.
+        </div>
+        
+        <div class="legend">
+            <div class="legend-item"><div class="dot" style="background:#e74c3c"></div> –6 mode</div>
+            <div class="legend-item"><div class="dot" style="background:#f39c12"></div> –2 mode</div>
+            <div class="legend-item"><div class="dot" style="background:#3498db"></div> +2 mode</div>
+            <div class="legend-item"><div class="dot" style="background:#9b59b5"></div> +6 mode</div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const WIDTH = 920, HEIGHT = 660;
+        canvas.width = WIDTH; canvas.height = HEIGHT;
+
+        const means = [-6.0, -2.0, 2.0, 6.0];
+        const stds  = [0.5, 0.3, 0.4, 0.6];
+        const weights = [0.20, 0.30, 0.10, 0.40];
+        const colors = ['#e74c3c', '#f39c12', '#3498db', '#9b59b5'];
+
+        let cumWeights = [0];
+        for (let w of weights) cumWeights.push(cumWeights[cumWeights.length-1] + w);
+
+        function randn() {
+            let u=0, v=0;
+            while(u===0) u=Math.random();
+            while(v===0) v=Math.random();
+            return Math.sqrt(-2*Math.log(u)) * Math.cos(2*Math.PI*v);
+        }
+
+        function gaussPdf(x, mu, sigma) {
+            return Math.exp(-0.5*Math.pow((x-mu)/sigma,2)) / (sigma*Math.sqrt(2*Math.PI));
+        }
+        function mixturePdf(x) {
+            let p=0;
+            for (let i=0; i<4; i++) p += weights[i] * gaussPdf(x, means[i], stds[i]);
+            return p;
+        }
+        function sampleTarget() {
+            const r = Math.random();
+            for (let i=0; i<4; i++) {
+                if (r < cumWeights[i+1]) {
+                    return {x: means[i] + stds[i]*randn(), mode:i};
+                }
+            }
+            return {x: means[3] + stds[3]*randn(), mode:3};
+        }
+
+        // Separate arrays
+        let paths = [];      // faint background paths (many)
+        let particles = [];  // visible moving dots (few)
+        const NUM_PATHS = 800;
+        const NUM_PARTICLES = 50;
+
+        function initSimulation() {
+            paths = [];
+            particles = [];
+            // Many faint paths
+            for (let i=0; i<NUM_PATHS; i++) {
+                const x0 = randn();
+                const target = sampleTarget();
+                paths.push({x0, x1: target.x});
+            }
+            // Few highlighted particles
+            for (let i=0; i<NUM_PARTICLES; i++) {
+                const x0 = randn();
+                const target = sampleTarget();
+                particles.push({x0, x1: target.x, mode: target.mode});
+            }
+        }
+
+        const marginLeft = 70;
+        const plotWidth = WIDTH - 120;
+        const flowTopY = 115;     // target (t=1)
+        const flowBottomY = 535;  // noise (t=0)
+
+        function mapX(x) { return marginLeft + (x + 10) / 20 * plotWidth; }
+
+        function drawPaths() {
+            ctx.lineWidth = 1.2;
+            for (let p of paths) {
+                ctx.strokeStyle = 'rgba(120,120,130,0.055)';
+                ctx.beginPath();
+                ctx.moveTo(mapX(p.x0), flowBottomY);
+                ctx.lineTo(mapX(p.x1), flowTopY);
+                ctx.stroke();
+            }
+        }
+
+        function drawDensity(isTarget, baseY, direction) {
+            const points = [];
+            let maxPdf = 0;
+            for (let i=0; i<=220; i++) {
+                const x = -10 + 20*i/220;
+                const p = isTarget ? mixturePdf(x) : gaussPdf(x,0,1);
+                maxPdf = Math.max(maxPdf, p);
+                points.push({x, p});
+            }
+            const scale = 46;
+            ctx.beginPath();
+            ctx.moveTo(mapX(points[0].x), baseY);
+            for (let pt of points) {
+                const px = mapX(pt.x);
+                const h = (pt.p / maxPdf) * scale;
+                ctx.lineTo(px, baseY + direction * h);
+            }
+            ctx.lineTo(mapX(points[points.length-1].x), baseY);
+            ctx.closePath();
+            ctx.fillStyle = isTarget ? 'rgba(46,204,113,0.18)' : 'rgba(52,152,219,0.18)';
+            ctx.fill();
+
+            ctx.strokeStyle = isTarget ? '#27ae60' : '#2980b9';
+            ctx.lineWidth = 3.5;
+            ctx.beginPath();
+            ctx.moveTo(mapX(points[0].x), baseY);
+            for (let pt of points) {
+                const px = mapX(pt.x);
+                const h = (pt.p / maxPdf) * scale;
+                ctx.lineTo(px, baseY + direction * h);
+            }
+            ctx.stroke();
+        }
+
+        function drawAxesAndLabels() {
+            ctx.strokeStyle = '#555'; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.moveTo(marginLeft, flowTopY+8); ctx.lineTo(marginLeft+plotWidth, flowTopY+8); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(marginLeft, flowBottomY-8); ctx.lineTo(marginLeft+plotWidth, flowBottomY-8); ctx.stroke();
+
+            ctx.fillStyle = '#222'; ctx.font = '600 15px system-ui'; ctx.textAlign = 'center';
+            ctx.fillText('t = 0 — Noise p₀ ~ 𝒩(0,1)', WIDTH/2, flowBottomY+42);
+            ctx.fillText('t = 1 — Target p₁ (quad-modal)', WIDTH/2, flowTopY-22);
+
+            ctx.font = '12px system-ui';
+            const ticks = [-10,-5,0,5,10];
+            for (let tx of ticks) {
+                const px = mapX(tx);
+                ctx.fillText(tx.toString(), px, flowBottomY+28);
+                ctx.fillText(tx.toString(), px, flowTopY-14);
+            }
+
+            ctx.save();
+            ctx.translate(32, (flowTopY + flowBottomY)/2);
+            ctx.rotate(-Math.PI/2);
+            ctx.font = '600 15px system-ui';
+            ctx.textAlign = 'center';
+            ctx.fillText('time  t  →', 0, 0);
+            ctx.restore();
+        }
+
+        function drawParticles(t) {
+            ctx.shadowBlur = 8; ctx.shadowColor = 'rgba(0,0,0,0.3)';
+            for (let p of particles) {
+                const x = (1-t)*p.x0 + t*p.x1;
+                const px = mapX(x);
+                const py = flowBottomY - t*(flowBottomY - flowTopY);
+                ctx.fillStyle = colors[p.mode];
+                ctx.beginPath();
+                ctx.arc(px, py, 3.5, 0, Math.PI*2);
+                ctx.fill();
+            }
+            ctx.shadowBlur = 0;
+        }
+
+        function draw(showPaths) {
+            ctx.clearRect(0,0,WIDTH,HEIGHT);
+            if (showPaths) drawPaths();
+            drawDensity(true, 73, -1);   // top = target
+            drawDensity(false, 555, +1); // bottom = noise
+            drawParticles(currentT);
+            drawAxesAndLabels();
+        }
+
+        let currentT = 0;
+        let isPlaying = false;
+        let lastTimestamp = 0;
+        let animationFrame = null;
+        const SPEED = 0.22;   // nice speed
+
+        function animate(ts) {
+            if (!lastTimestamp) lastTimestamp = ts;
+            const dt = (ts - lastTimestamp)/1000;
+            lastTimestamp = ts;
+
+            if (isPlaying) {
+                currentT += dt * SPEED;
+                if (currentT >= 1) {
+                    currentT = 1;
+                    isPlaying = false;
+                    document.getElementById('playBtn').style.display = 'inline-block';
+                    document.getElementById('pauseBtn').style.display = 'none';
+                }
+            }
+
+            draw(document.getElementById('showPaths').checked);
+            document.getElementById('timeDisplay').textContent = currentT.toFixed(2);
+            animationFrame = requestAnimationFrame(animate);
+        }
+
+        function start() { if (currentT>=1) currentT=0; isPlaying=true; document.getElementById('playBtn').style.display='none'; document.getElementById('pauseBtn').style.display='inline-block'; }
+        function pause() { isPlaying=false; document.getElementById('playBtn').style.display='inline-block'; document.getElementById('pauseBtn').style.display='none'; }
+        function reset() { pause(); currentT=0; draw(document.getElementById('showPaths').checked); document.getElementById('timeDisplay').textContent='0.00'; }
+
+        window.onload = () => {
+            initSimulation();
+
+            document.getElementById('playBtn').onclick = start;
+            document.getElementById('pauseBtn').onclick = pause;
+            document.getElementById('resetBtn').onclick = reset;
+
+            const slider = document.getElementById('timeSlider');
+            slider.addEventListener('input', () => {
+                pause();
+                currentT = parseFloat(slider.value);
+                draw(document.getElementById('showPaths').checked);
+            });
+
+            document.getElementById('showPaths').addEventListener('change', () => draw(this.checked));
+
+            draw(true);
+            document.getElementById('timeDisplay').textContent = '0.00';
+            animationFrame = requestAnimationFrame(animate);
+        };
+    </script>
+</body>
+</html>
